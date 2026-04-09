@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Build zip from tag commit
         id: package
@@ -42,8 +43,16 @@ jobs:
         run: |
           set -euo pipefail
           TAG_NAME="${GITHUB_REF_NAME}"
+          TAG_REF="refs/tags/${TAG_NAME}"
           NOTES_FILE="dist/release-notes-${TAG_NAME}.md"
-          TAG_MESSAGE="$(git for-each-ref "refs/tags/${TAG_NAME}" --format='%(contents)')"
+
+          git fetch --force origin "${TAG_REF}:${TAG_REF}" >/dev/null 2>&1 || true
+
+          TAG_MESSAGE=""
+          TAG_TYPE="$(git cat-file -t "${TAG_REF}" 2>/dev/null || true)"
+          if [ "${TAG_TYPE}" = "tag" ]; then
+            TAG_MESSAGE="$(git cat-file tag "${TAG_REF}" | sed '1,/^$/d')"
+          fi
 
           CLEANED_MESSAGE="$(printf '%s\n' "${TAG_MESSAGE}" | sed -e '/^Release[[:space:]]\+/Id' -e '/^$/N;/^\n$/D')"
 

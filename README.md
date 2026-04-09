@@ -34,7 +34,7 @@
 
 ## 版本与打包
 
-- 当前扩展版本：`1.0.2`（见 `manifest.json`）
+- 当前扩展版本：`1.0.3`（见 `manifest.json`）
 - 每次推送新的 Git tag 后，GitHub Actions 会自动打包生成：`MSRegFlow-<tag>.zip`
 - Release 会优先使用 **tag 注释内容** 作为中文更新日志
 - 自动打包工作流位置：`.github/workflows/package-on-tag.yml`
