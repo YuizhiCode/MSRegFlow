@@ -737,6 +737,36 @@ async function deleteMicrosoftManagerAccountByEmail(state, email) {
   });
 }
 
+async function updateMicrosoftManagerAccountRemarkByEmail(state, email, remark) {
+  const normalizedEmail = String(email || '').trim();
+  const normalizedRemark = String(remark || '').trim();
+
+  if (!normalizedEmail) {
+    throw new Error('No email was provided for Microsoft Account Manager remark update.');
+  }
+  if (!normalizedRemark) {
+    throw new Error('No remark text was provided for Microsoft Account Manager remark update.');
+  }
+
+  const accounts = await listMicrosoftManagerAccounts(state, { keyword: normalizedEmail });
+  const matches = findExactMicrosoftManagerAccounts(accounts, normalizedEmail);
+
+  if (!matches.length) {
+    throw new Error(`${normalizedEmail} was not found in Microsoft Account Manager account list.`);
+  }
+
+  const target = matches[0];
+  const id = Number(target?.id || 0);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw new Error(`No valid account id found for ${normalizedEmail}.`);
+  }
+
+  await requestMicrosoftManagerApi(state, `/api/open/accounts/${id}/remark`, {
+    method: 'PATCH',
+    body: { remark: normalizedRemark },
+  });
+}
+
 function pickMicrosoftManagerAccount(accounts, state) {
   if (!accounts.length) return null;
 
@@ -3026,10 +3056,24 @@ async function executeStep10(state) {
 
   if (!state.autoDeleteUsedIcloudAlias) {
     await addLog('Step 10: Cleanup is disabled. Enable Cleanup if you want to auto-delete the source email.', 'warn');
+    let remarkUpdated = false;
+    const provider = normalizeMailProvider(state.mailProvider);
+    if (provider === 'microsoft-manager') {
+      try {
+        await updateMicrosoftManagerAccountRemarkByEmail(state, email, '已注册');
+        remarkUpdated = true;
+        await addLog(`Microsoft Manager: Updated remark for ${email} -> 已注册`, 'ok');
+      } catch (err) {
+        await addLog(`Microsoft Manager: Failed to update remark for ${email}: ${getErrorMessage(err)}`, 'warn');
+      }
+    }
+
     await completeBackgroundStep(10, {
       skipped: true,
       reason: 'cleanup_disabled',
       deleted: false,
+      remarkUpdated,
+      remark: remarkUpdated ? '已注册' : null,
       email,
     });
     return;

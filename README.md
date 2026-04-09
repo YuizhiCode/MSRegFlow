@@ -34,7 +34,7 @@
 
 ## 版本与打包
 
-- 当前扩展版本：`1.0.0`（见 `manifest.json`）
+- 当前扩展版本：`1.0.1`（见 `manifest.json`）
 - 每次推送新的 Git tag 后，GitHub Actions 会自动打包生成：`MSRegFlow-<tag>.zip`
 - 自动打包工作流位置：`.github/workflows/package-on-tag.yml`
 
@@ -134,6 +134,7 @@ http(s)://<your-host>/management.html#/oauth
 
 - 开启后，Step 10 会在成功导入后自动删除当前来源账号
 - 删除失败不会阻断整轮流程完成标记
+- 未开启时，Step 10 会自动给当前账号打备注：`已注册`
 
 ---
 
