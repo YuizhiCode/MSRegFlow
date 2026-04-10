@@ -5,7 +5,7 @@ console.log('[MultiPage:signup-page] Content script loaded on', location.href);
 
 // Listen for commands from Background
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'WAIT_FOR_SURFACE' || message.type === 'RESEND_VERIFICATION_CODE') {
+  if (message.type === 'EXECUTE_STEP' || message.type === 'FILL_CODE' || message.type === 'STEP8_FIND_AND_CLICK' || message.type === 'WAIT_FOR_SURFACE' || message.type === 'RESEND_VERIFICATION_CODE' || message.type === 'RECOVER_PASSWORD_TIMEOUT') {
     resetStopState();
     handleCommand(message).then((result) => {
       sendResponse({ ok: true, ...(result || {}) });
@@ -24,6 +24,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       if (message.type === 'RESEND_VERIFICATION_CODE') {
         log(`Step ${message.step}: ${err.message}`, 'error');
+        sendResponse({ error: err.message });
+        return;
+      }
+
+      if (message.type === 'RECOVER_PASSWORD_TIMEOUT') {
+        log(`Step ${message.step || 3}: ${err.message}`, 'error');
         sendResponse({ error: err.message });
         return;
       }
@@ -54,7 +60,17 @@ async function handleCommand(message) {
       return await waitForSurfacePayload(message.payload);
     case 'RESEND_VERIFICATION_CODE':
       return await resendVerificationCode(message.step, message.payload);
+    case 'RECOVER_PASSWORD_TIMEOUT':
+      return await recoverPasswordTimeoutFromBackground(message.payload);
   }
+}
+
+async function recoverPasswordTimeoutFromBackground(payload = {}) {
+  const recovered = await recoverPasswordAfterTimeout({
+    fallbackPassword: payload.password || '',
+    context: 'background-step3-retry',
+  });
+  return { recovered, url: location.href };
 }
 
 async function ensureAuthSurfaceReady(step, timeout = 15000) {

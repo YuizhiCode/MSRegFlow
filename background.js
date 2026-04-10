@@ -2414,7 +2414,7 @@ async function executeStep3(state) {
     payload: { email: state.email, password },
   });
 
-  await waitForSignupSurface({
+  const step3SurfacePayload = {
     step: 3,
     selectors: [
       'input[name="code"]',
@@ -2425,7 +2425,39 @@ async function executeStep3(state) {
       '[role="spinbutton"][data-type="year"]',
       'input[name="age"]',
     ],
-  });
+  };
+
+  try {
+    await waitForSignupSurface(step3SurfacePayload);
+  } catch (err) {
+    const message = getErrorMessage(err);
+    const isSurfaceTimeout = /expected next page surface not found|signup page surface wait failed/i.test(message);
+    if (!isSurfaceTimeout) {
+      throw err;
+    }
+
+    await addLog('Step 3: Detected possible password timeout page. Trying "重试" and rerunning step 3...', 'warn');
+
+    try {
+      await sendToContentScript('signup-page', {
+        type: 'RECOVER_PASSWORD_TIMEOUT',
+        step: 3,
+        source: 'background',
+        payload: { password },
+      });
+    } catch (recoverErr) {
+      await addLog(`Step 3: Retry button recovery failed, fallback to rerun step 3. ${getErrorMessage(recoverErr)}`, 'warn');
+    }
+
+    await sendToContentScript('signup-page', {
+      type: 'EXECUTE_STEP',
+      step: 3,
+      source: 'background',
+      payload: { email: state.email, password },
+    });
+
+    await waitForSignupSurface(step3SurfacePayload, 30000);
+  }
 }
 
 // ============================================================
