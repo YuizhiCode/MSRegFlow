@@ -15,8 +15,16 @@ const STOP_ERROR_MESSAGE = 'Flow stopped by user.';
 const HUMAN_STEP_DELAY_MIN = 700;
 const HUMAN_STEP_DELAY_MAX = 2200;
 const TOTAL_STEPS = 10;
+const AUTO_RUN_STEP_SEQUENCE = [1, 2, 3, 4, 5, 8, 9, 10];
+const AUTO_RUN_DISPLAY_STEP_MAP = AUTO_RUN_STEP_SEQUENCE.reduce((acc, step, index) => {
+  acc[step] = index + 1;
+  return acc;
+}, {});
 
-initializeSessionStorageAccess();
+initializeSessionStorageAccess().catch(() => {});
+bootstrapPersistentSettings().catch((err) => {
+  console.warn(LOG_PREFIX, 'Failed to bootstrap persistent settings:', err?.message || err);
+});
 
 // ============================================================
 // State Management (chrome.storage.session)
@@ -35,6 +43,7 @@ const DEFAULT_STATE = {
   language: 'zh-CN',
   oauthUrl: null,
   autoDeleteUsedIcloudAlias: false,
+  deleteAbusedMicrosoftAccount: false,
   email: null,
   password: null,
   accounts: [], // Successfully completed accounts: { email, password, createdAt }
@@ -46,6 +55,8 @@ const DEFAULT_STATE = {
   logs: [],
   oauthProvider: 'cpaauth', // 'cpaauth' or 'sub2api'
   vpsUrl: '',
+  cpaManagementKey: '',
+  cpaAuthState: null,
   sub2apiBaseUrl: '',
   sub2apiAdminApiKey: '',
   sub2apiSessionId: null,
@@ -58,12 +69,92 @@ const DEFAULT_STATE = {
   microsoftManagerToken: '',
   microsoftManagerMode: 'graph',
   microsoftManagerKeyword: '',
+  blockedMicrosoftEmails: {},
 };
 
+const PERSISTENT_SETTING_KEYS = [
+  'language',
+  'oauthProvider',
+  'vpsUrl',
+  'cpaManagementKey',
+  'sub2apiBaseUrl',
+  'sub2apiAdminApiKey',
+  'autoDeleteUsedIcloudAlias',
+  'deleteAbusedMicrosoftAccount',
+  'customPassword',
+  'mailProvider',
+  'inbucketHost',
+  'inbucketMailbox',
+  'microsoftManagerUrl',
+  'microsoftManagerToken',
+  'microsoftManagerMode',
+  'microsoftManagerKeyword',
+];
+
+function normalizePersistentSettings(raw = {}) {
+  return {
+    language: String(raw.language || DEFAULT_STATE.language),
+    oauthProvider: normalizeOauthProvider(raw.oauthProvider || DEFAULT_STATE.oauthProvider),
+    vpsUrl: String(raw.vpsUrl || ''),
+    cpaManagementKey: String(raw.cpaManagementKey || ''),
+    sub2apiBaseUrl: String(raw.sub2apiBaseUrl || ''),
+    sub2apiAdminApiKey: String(raw.sub2apiAdminApiKey || ''),
+    autoDeleteUsedIcloudAlias: Boolean(raw.autoDeleteUsedIcloudAlias),
+    deleteAbusedMicrosoftAccount: Boolean(raw.deleteAbusedMicrosoftAccount),
+    customPassword: String(raw.customPassword || ''),
+    mailProvider: normalizeMailProvider(raw.mailProvider || DEFAULT_STATE.mailProvider),
+    inbucketHost: String(raw.inbucketHost || ''),
+    inbucketMailbox: String(raw.inbucketMailbox || ''),
+    microsoftManagerUrl: String(raw.microsoftManagerUrl || ''),
+    microsoftManagerToken: String(raw.microsoftManagerToken || ''),
+    microsoftManagerMode: normalizeMicrosoftManagerMode(raw.microsoftManagerMode || DEFAULT_STATE.microsoftManagerMode),
+    microsoftManagerKeyword: String(raw.microsoftManagerKeyword || ''),
+  };
+}
+
+function pickPersistentSettings(source = {}) {
+  const updates = {};
+  for (const key of PERSISTENT_SETTING_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) {
+      updates[key] = source[key];
+    }
+  }
+  return updates;
+}
+
+async function getPersistentSettings() {
+  const stored = await chrome.storage.local.get(PERSISTENT_SETTING_KEYS);
+  return normalizePersistentSettings(stored);
+}
+
+async function persistSettingsIfNeeded(source = {}) {
+  const updates = pickPersistentSettings(source);
+  if (!Object.keys(updates).length) return;
+  await chrome.storage.local.set(updates);
+}
+
+async function bootstrapPersistentSettings() {
+  const localSettings = await chrome.storage.local.get(PERSISTENT_SETTING_KEYS);
+  const hasLocal = Object.keys(localSettings).some((key) => localSettings[key] !== undefined);
+  if (hasLocal) return;
+
+  const sessionSettings = await chrome.storage.session.get(PERSISTENT_SETTING_KEYS);
+  const seed = pickPersistentSettings(sessionSettings);
+  if (!Object.keys(seed).length) return;
+
+  await chrome.storage.local.set(seed);
+  console.log(LOG_PREFIX, 'Bootstrapped persistent settings from current session storage.');
+}
+
 async function getState() {
-  const state = await chrome.storage.session.get(null);
+  const [state, persistentSettings] = await Promise.all([
+    chrome.storage.session.get(null),
+    getPersistentSettings(),
+  ]);
+
   const merged = {
     ...DEFAULT_STATE,
+    ...persistentSettings,
     ...state,
     stepStatuses: {
       ...DEFAULT_STATE.stepStatuses,
@@ -699,6 +790,27 @@ function isMicrosoftManagerRegisteredRemark(remark) {
   return String(remark || '').trim() === '已注册';
 }
 
+function isMicrosoftManagerBlockedRemark(remark) {
+  const value = String(remark || '').trim();
+  return value === '已封禁' || value === '封禁' || /服务滥用|service abuse|abuse mode/i.test(value);
+}
+
+function getBlockedMicrosoftEmailMap(state) {
+  return state?.blockedMicrosoftEmails && typeof state.blockedMicrosoftEmails === 'object'
+    ? { ...state.blockedMicrosoftEmails }
+    : {};
+}
+
+async function markMicrosoftEmailBlocked(email) {
+  const normalizedEmail = String(email || '').trim();
+  if (!normalizedEmail) return;
+
+  const state = await getState();
+  const blockedMap = getBlockedMicrosoftEmailMap(state);
+  blockedMap[normalizedEmail] = true;
+  await setState({ blockedMicrosoftEmails: blockedMap });
+}
+
 async function listMicrosoftManagerAccounts(state, options = {}) {
   const keyword = String(options.keyword ?? state.microsoftManagerKeyword ?? '').trim();
   const payload = await requestMicrosoftManagerApi(state, '/api/open/accounts', {
@@ -774,7 +886,12 @@ async function updateMicrosoftManagerAccountRemarkByEmail(state, email, remark) 
 function pickMicrosoftManagerAccount(accounts, state) {
   if (!accounts.length) return null;
 
-  const availableAccounts = accounts.filter(account => !isMicrosoftManagerRegisteredRemark(account?.remark));
+  const blockedMap = getBlockedMicrosoftEmailMap(state);
+  const availableAccounts = accounts.filter((account) => {
+    if (isMicrosoftManagerRegisteredRemark(account?.remark)) return false;
+    if (isMicrosoftManagerBlockedRemark(account?.remark)) return false;
+    return !blockedMap[String(account?.account || '').trim()];
+  });
   if (!availableAccounts.length) return null;
 
   const usedEmails = new Set(
@@ -796,11 +913,16 @@ async function fetchMicrosoftManagerEmail(options = {}) {
     throw new Error('No account found in Microsoft Account Manager.');
   }
 
-  const blockedByRemarkCount = accounts.filter(account => isMicrosoftManagerRegisteredRemark(account?.remark)).length;
+  const stateBlockedMap = getBlockedMicrosoftEmailMap(state);
+  const blockedByRemarkCount = accounts.filter(account => isMicrosoftManagerRegisteredRemark(account?.remark) || isMicrosoftManagerBlockedRemark(account?.remark)).length;
+  const blockedByRuntimeCount = accounts.filter(account => stateBlockedMap[String(account?.account || '').trim()]).length;
   const selected = pickMicrosoftManagerAccount(accounts, state);
   if (!selected?.account) {
     if (blockedByRemarkCount > 0 && blockedByRemarkCount === accounts.length) {
-      throw new Error('No available account found. All Microsoft accounts are marked as 已注册.');
+      throw new Error('No available account found. All Microsoft accounts are marked as 已注册/已封禁.');
+    }
+    if (blockedByRuntimeCount > 0 && blockedByRuntimeCount === accounts.length) {
+      throw new Error('No available account found. All Microsoft accounts were blocked in this run.');
     }
     throw new Error('No valid account email found in Microsoft Account Manager.');
   }
@@ -923,6 +1045,10 @@ async function pollMicrosoftManagerCode(state, step, pollPayload = {}) {
     } catch (err) {
       lastErrorMessage = getErrorMessage(err);
       await addLog(`Step ${step}: Microsoft Account Manager poll failed on attempt ${attempt}: ${lastErrorMessage}`, 'warn');
+
+      if (isMicrosoftServiceAbuseError(lastErrorMessage)) {
+        throw new Error(lastErrorMessage);
+      }
     }
 
     if (attempt < maxAttempts) {
@@ -942,6 +1068,79 @@ async function pollMicrosoftManagerCode(state, step, pollPayload = {}) {
   };
 }
 
+function isMicrosoftServiceAbuseError(error) {
+  const message = getErrorMessage(error).toLowerCase();
+  return message.includes('aadsts70000')
+    || message.includes('service abuse mode')
+    || message.includes('abuse mode')
+    || message.includes('服务滥用');
+}
+
+async function reopenSignupForReplacementEmail(state) {
+  if (!state.oauthUrl) {
+    throw new Error('No OAuth URL available to restart signup with replacement email.');
+  }
+  if (!state.email) {
+    throw new Error('No replacement email available to restart signup.');
+  }
+
+  await addLog('Step 4: Reopening signup flow with replacement email...', 'warn');
+  await reuseOrCreateTab('signup-page', state.oauthUrl);
+
+  try {
+    await executeStep2(state);
+  } catch (err) {
+    await addLog(`Step 4: Step 2 retry skipped: ${getErrorMessage(err)}`, 'warn');
+  }
+
+  await executeStep3(state);
+}
+
+async function handleMicrosoftServiceAbuseDuringStep4(state, context = {}) {
+  const currentEmail = String(state.email || '').trim();
+  const deleteBlocked = Boolean(state.deleteAbusedMicrosoftAccount);
+
+  if (!currentEmail) {
+    throw new Error('Current email is empty when handling blocked-account fallback.');
+  }
+
+  await addLog(`Step 4: Detected blocked account (${currentEmail}) with AADSTS70000.`, 'warn');
+  await markMicrosoftEmailBlocked(currentEmail);
+
+  if (deleteBlocked) {
+    try {
+      await deleteMicrosoftManagerAccountByEmail(state, currentEmail);
+      await addLog(`Step 4: Blocked email ${currentEmail} has been deleted from Microsoft Manager.`, 'ok');
+    } catch (err) {
+      await addLog(`Step 4: Failed to delete blocked email ${currentEmail}: ${getErrorMessage(err)}`, 'warn');
+    }
+  } else {
+    try {
+      await updateMicrosoftManagerAccountRemarkByEmail(state, currentEmail, '已封禁');
+      await addLog(`Step 4: Blocked email ${currentEmail} marked as 已封禁.`, 'ok');
+    } catch (err) {
+      await addLog(`Step 4: Failed to mark blocked email ${currentEmail}: ${getErrorMessage(err)}`, 'warn');
+    }
+  }
+
+  const previousEmail = currentEmail;
+  const replacementEmail = await fetchConfiguredEmail({ generateNew: true });
+  if (!replacementEmail) {
+    throw new Error('No replacement email available after blocked-account fallback.');
+  }
+  if (String(replacementEmail).trim() === previousEmail) {
+    throw new Error('Replacement email is the same as blocked email. Please prepare more accounts in Microsoft Manager.');
+  }
+
+  await addLog(
+    `Step 4: Switched to replacement email ${replacementEmail} (${context.round || 1}/${context.maxRounds || 1}).`,
+    'ok'
+  );
+
+  const refreshed = await getState();
+  await reopenSignupForReplacementEmail(refreshed);
+}
+
 async function fetchConfiguredEmail(options = {}) {
   return fetchMicrosoftManagerEmail(options);
 }
@@ -949,49 +1148,23 @@ async function fetchConfiguredEmail(options = {}) {
 async function resetState() {
   console.log(LOG_PREFIX, 'Resetting all state');
   // Preserve settings and persistent data across resets
+  const persistentSettings = await getPersistentSettings();
   const prev = await chrome.storage.session.get([
     'seenCodes',
     'seenInbucketMailIds',
     'accounts',
     'manualAliasUsage',
     'tabRegistry',
-    'language',
-    'oauthProvider',
-    'vpsUrl',
-    'sub2apiBaseUrl',
-    'sub2apiAdminApiKey',
-    'autoDeleteUsedIcloudAlias',
-    'customPassword',
-    'mailProvider',
-    'inbucketHost',
-    'inbucketMailbox',
-    'microsoftManagerUrl',
-    'microsoftManagerToken',
-    'microsoftManagerMode',
-    'microsoftManagerKeyword',
   ]);
   await chrome.storage.session.clear();
   await chrome.storage.session.set({
     ...DEFAULT_STATE,
+    ...persistentSettings,
     seenCodes: prev.seenCodes || [],
     seenInbucketMailIds: prev.seenInbucketMailIds || [],
     accounts: prev.accounts || [],
     manualAliasUsage: prev.manualAliasUsage && typeof prev.manualAliasUsage === 'object' ? prev.manualAliasUsage : {},
     tabRegistry: prev.tabRegistry || {},
-    language: prev.language || 'zh-CN',
-    oauthProvider: normalizeOauthProvider(prev.oauthProvider || 'cpaauth'),
-    vpsUrl: prev.vpsUrl || '',
-    sub2apiBaseUrl: prev.sub2apiBaseUrl || '',
-    sub2apiAdminApiKey: prev.sub2apiAdminApiKey || '',
-    autoDeleteUsedIcloudAlias: Boolean(prev.autoDeleteUsedIcloudAlias),
-    customPassword: prev.customPassword || '',
-    mailProvider: normalizeMailProvider(prev.mailProvider),
-    inbucketHost: prev.inbucketHost || '',
-    inbucketMailbox: prev.inbucketMailbox || '',
-    microsoftManagerUrl: prev.microsoftManagerUrl || '',
-    microsoftManagerToken: prev.microsoftManagerToken || '',
-    microsoftManagerMode: normalizeMicrosoftManagerMode(prev.microsoftManagerMode || 'graph'),
-    microsoftManagerKeyword: prev.microsoftManagerKeyword || '',
   });
 }
 
@@ -1520,6 +1693,7 @@ async function handleMessage(message, sender) {
       if (message.payload.language !== undefined) updates.language = message.payload.language;
       if (message.payload.oauthProvider !== undefined) updates.oauthProvider = normalizeOauthProvider(message.payload.oauthProvider);
       if (message.payload.vpsUrl !== undefined) updates.vpsUrl = message.payload.vpsUrl;
+      if (message.payload.cpaManagementKey !== undefined) updates.cpaManagementKey = message.payload.cpaManagementKey;
       if (message.payload.sub2apiBaseUrl !== undefined) {
         updates.sub2apiBaseUrl = message.payload.sub2apiBaseUrl;
         updates.sub2apiRuntimeCredential = '';
@@ -1529,6 +1703,7 @@ async function handleMessage(message, sender) {
         updates.sub2apiRuntimeCredential = '';
       }
       if (message.payload.autoDeleteUsedIcloudAlias !== undefined) updates.autoDeleteUsedIcloudAlias = Boolean(message.payload.autoDeleteUsedIcloudAlias);
+      if (message.payload.deleteAbusedMicrosoftAccount !== undefined) updates.deleteAbusedMicrosoftAccount = Boolean(message.payload.deleteAbusedMicrosoftAccount);
       if (message.payload.customPassword !== undefined) updates.customPassword = message.payload.customPassword;
       if (message.payload.mailProvider !== undefined) updates.mailProvider = normalizeMailProvider(message.payload.mailProvider);
       if (message.payload.inbucketHost !== undefined) updates.inbucketHost = message.payload.inbucketHost;
@@ -1538,6 +1713,7 @@ async function handleMessage(message, sender) {
       if (message.payload.microsoftManagerMode !== undefined) updates.microsoftManagerMode = normalizeMicrosoftManagerMode(message.payload.microsoftManagerMode);
       if (message.payload.microsoftManagerKeyword !== undefined) updates.microsoftManagerKeyword = message.payload.microsoftManagerKeyword;
       await setState(updates);
+      await persistSettingsIfNeeded(updates);
       return { ok: true };
     }
 
@@ -1727,8 +1903,6 @@ async function executeStep(step) {
       case 3: await executeStep3(state); break;
       case 4: await executeStep4(state); break;
       case 5: await executeStep5(state); break;
-      case 6: await executeStep6(state); break;
-      case 7: await executeStep7(state); break;
       case 8: await executeStep8(state); break;
       case 9: await executeStep9(state); break;
       case 10: await executeStep10(state); break;
@@ -1793,8 +1967,8 @@ function getAutoStepDelay(step) {
     3: 3000,
     4: 2000,
     5: 3000,
-    6: 3000,
-    7: 2000,
+    6: 200,
+    7: 200,
     8: 2000,
     9: 1000,
     10: 800,
@@ -1835,23 +2009,39 @@ async function waitForSignupSurface(payload, timeout = 20000) {
   throw new Error(`Signup page surface wait failed: ${getErrorMessage(lastError)}`);
 }
 
+function getOauthConsentSurfaceSelectors() {
+  return [
+    'form[action*="/sign-in-with-chatgpt/codex/consent"]',
+    'div._ctas_1maco_29',
+    'button[type="submit"][data-dd-action-name="Continue"]',
+    'form[action*="/consent"] button[type="submit"]',
+    'a[href="https://chatgpt.com"]',
+  ];
+}
+
 function getAutoResumeStep(state) {
   const statuses = state?.stepStatuses || {};
 
-  for (let step = 1; step <= TOTAL_STEPS; step++) {
+  for (const step of AUTO_RUN_STEP_SEQUENCE) {
     const status = statuses[step];
     if (status === 'failed' || status === 'stopped' || status === 'running') {
       return step;
     }
   }
 
-  for (let step = 1; step <= TOTAL_STEPS; step++) {
+  for (const step of AUTO_RUN_STEP_SEQUENCE) {
     if (statuses[step] === 'pending') {
       return step;
     }
   }
 
   return null;
+}
+
+function toAutoRunDisplayStep(step) {
+  const normalized = Number(step);
+  if (!Number.isFinite(normalized)) return step;
+  return AUTO_RUN_DISPLAY_STEP_MAP[normalized] || normalized;
 }
 
 async function ensureAutoRunEmailReady(run, totalRuns) {
@@ -1895,7 +2085,7 @@ async function executeAutoRunSteps(run, totalRuns, options = {}) {
   if (!startStep) return;
 
   if (resumeFromCurrentState) {
-    await addLog(`=== Run ${run}/${totalRuns} — Resuming from step ${startStep} ===`, 'warn');
+    await addLog(`=== Run ${run}/${totalRuns} — Resuming from step ${toAutoRunDisplayStep(startStep)} ===`, 'warn');
   }
 
   if (startStep <= 2) {
@@ -1912,7 +2102,8 @@ async function executeAutoRunSteps(run, totalRuns, options = {}) {
   }
 
   let needsPhase2 = false;
-  for (let step = startStep; step <= TOTAL_STEPS; step++) {
+  for (const step of AUTO_RUN_STEP_SEQUENCE) {
+    if (step < startStep) continue;
     const stepStatus = (await getState()).stepStatuses?.[step];
     if (stepStatus !== 'completed' && stepStatus !== 'skipped') {
       needsPhase2 = true;
@@ -1932,7 +2123,8 @@ async function executeAutoRunSteps(run, totalRuns, options = {}) {
     await chrome.tabs.update(signupTabId, { active: true });
   }
 
-  for (let step = Math.max(3, startStep); step <= TOTAL_STEPS; step++) {
+  for (const step of AUTO_RUN_STEP_SEQUENCE) {
+    if (step < Math.max(3, startStep)) continue;
     const currentState = await getState();
     const stepStatus = currentState.stepStatuses?.[step];
     if (stepStatus === 'completed' || stepStatus === 'skipped') continue;
@@ -2094,6 +2286,11 @@ async function executeStep1(state) {
     return;
   }
 
+  if (shouldUseCpaManagementApi(state)) {
+    await executeStep1WithCpaApi(state);
+    return;
+  }
+
   if (!state.vpsUrl) {
     throw new Error('No CPA Auth URL configured. Enter the CPA Auth address in Side Panel first.');
   }
@@ -2109,6 +2306,26 @@ async function executeStep1(state) {
     source: 'background',
     payload: {},
   });
+}
+
+async function executeStep1WithCpaApi(state) {
+  await addLog('Step 1: Requesting OAuth URL from CPA Management API...');
+  await setState({ cpaAuthState: null });
+
+  const payload = await requestCpaManagementApi(state, 'codex-auth-url', {
+    method: 'GET',
+  });
+
+  const oauthUrl = String(payload?.url || payload?.auth_url || '').trim();
+  const oauthState = String(payload?.state || '').trim();
+
+  if (!oauthUrl || !oauthState) {
+    throw new Error('CPA management API did not return url/state.');
+  }
+
+  await setState({ cpaAuthState: oauthState });
+  await addLog(`Step 1: CPA OAuth URL ready (${oauthUrl.slice(0, 80)}...)`, 'ok');
+  await completeBackgroundStep(1, { oauthUrl });
 }
 
 async function executeStep1WithSub2api(state) {
@@ -2252,6 +2469,178 @@ function normalizeInbucketOrigin(rawValue) {
   } catch {
     return '';
   }
+}
+
+function normalizeCpaManagementApiRoot(rawValue) {
+  const value = String(rawValue || '').trim();
+  if (!value) return '';
+
+  const candidate = /^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value) ? value : `https://${value}`;
+
+  try {
+    const parsed = new URL(candidate);
+    let apiPath = parsed.pathname.replace(/\/+$/, '') || '';
+
+    const panelPathMatch = apiPath.match(/^(.*)\/management(?:\.html)?$/i);
+    if (panelPathMatch) {
+      apiPath = panelPathMatch[1] || '';
+    }
+
+    const managementMatch = apiPath.match(/^(.*?\/v0\/management)(?:\/.*)?$/i);
+    if (managementMatch) {
+      apiPath = managementMatch[1];
+    }
+
+    if (!apiPath || apiPath === '/') {
+      apiPath = '/v0/management';
+    } else if (!/\/v0\/management$/i.test(apiPath)) {
+      apiPath = `${apiPath}/v0/management`;
+    }
+
+    return `${parsed.origin}${apiPath}`;
+  } catch {
+    return '';
+  }
+}
+
+function buildCpaManagementApiUrl(apiRoot, path, query = {}) {
+  const root = String(apiRoot || '').replace(/\/+$/, '');
+  const normalizedPath = String(path || '').replace(/^\/+/, '');
+  const url = new URL(`${root}/${normalizedPath}`);
+
+  if (query && typeof query === 'object') {
+    for (const [key, value] of Object.entries(query)) {
+      if (value === undefined || value === null) continue;
+      const normalizedValue = String(value).trim();
+      if (!normalizedValue) continue;
+      url.searchParams.set(key, normalizedValue);
+    }
+  }
+
+  return url.toString();
+}
+
+function shouldUseCpaManagementApi(state) {
+  return Boolean(String(state?.cpaManagementKey || '').trim());
+}
+
+function looksLikeBcryptHash(rawValue) {
+  const value = String(rawValue || '').trim();
+  return /^\$2[abxy]?\$\d{2}\$[./A-Za-z0-9]{53}$/.test(value);
+}
+
+async function requestCpaManagementApi(state, path, options = {}) {
+  const apiRoot = normalizeCpaManagementApiRoot(state.vpsUrl);
+  if (!apiRoot) {
+    throw new Error('CPA Auth URL is empty or invalid. Please configure CPA Auth address first.');
+  }
+
+  const managementKey = String(state.cpaManagementKey || '').trim();
+  if (!managementKey) {
+    throw new Error('CPA Management Key is empty. Fill it in Side Panel to use CPA API mode.');
+  }
+  if (looksLikeBcryptHash(managementKey)) {
+    throw new Error('CPA Management Key looks like a hashed value ($2...). Please use the original plaintext key, not the encrypted secret-key in CPA config.');
+  }
+
+  const url = buildCpaManagementApiUrl(apiRoot, path, options.query);
+  const headers = {
+    Accept: 'application/json',
+    'X-Management-Key': managementKey,
+    ...(options.headers || {}),
+  };
+
+  const init = {
+    method: options.method || 'GET',
+    headers,
+  };
+
+  if (options.body !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(options.body);
+  }
+
+  let response;
+  try {
+    response = await fetch(url, init);
+  } catch (err) {
+    throw new Error(`CPA management request failed: ${getErrorMessage(err)}`);
+  }
+
+  let payload = null;
+  let responseText = '';
+  try {
+    payload = await response.json();
+  } catch {
+    try {
+      responseText = await response.text();
+    } catch {
+      responseText = '';
+    }
+  }
+
+  if (!response.ok) {
+    const message = String(
+      payload?.error
+      || payload?.message
+      || payload?.detail
+      || responseText
+      || `${response.status} ${response.statusText}`
+    ).trim();
+
+    if (/invalid management key/i.test(message)) {
+      throw new Error('CPA management request failed: invalid management key. Use the plaintext Management Key (not encrypted $2... value in config).');
+    }
+
+    throw new Error(`CPA management request failed: ${message}`);
+  }
+
+  const status = String(payload?.status || '').trim().toLowerCase();
+  if (status === 'error') {
+    const message = String(payload?.error || payload?.message || 'Unknown error').trim();
+    throw new Error(`CPA management request failed: ${message}`);
+  }
+
+  return payload && typeof payload === 'object' ? payload : {};
+}
+
+async function waitForCpaAuthStatusReady(state, oauthState, options = {}) {
+  const stateValue = String(oauthState || '').trim();
+  if (!stateValue) {
+    throw new Error('No CPA OAuth state found. Please rerun step 1 first.');
+  }
+
+  const maxAttempts = Math.max(1, Number(options.maxAttempts || 40));
+  const intervalMs = Math.max(800, Number(options.intervalMs || 2000));
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    throwIfStopped();
+
+    if (attempt === 1 || attempt % 5 === 0) {
+      await addLog(`Step 9: Checking CPA Auth status... (${attempt}/${maxAttempts})`);
+    }
+
+    const payload = await requestCpaManagementApi(state, 'get-auth-status', {
+      method: 'GET',
+      query: { state: stateValue },
+    });
+
+    const status = String(payload?.status || '').trim().toLowerCase();
+    if (status === 'ok') {
+      return payload;
+    }
+
+    if (status === 'error') {
+      const message = String(payload?.error || 'Authentication failed.').trim();
+      throw new Error(`CPA Auth reported error: ${message}`);
+    }
+
+    if (attempt < maxAttempts) {
+      await sleepWithStop(intervalMs);
+    }
+  }
+
+  throw new Error('CPA Auth is still waiting for callback. Please rerun from step 1 and retry.');
 }
 
 function normalizeSub2apiApiRoot(rawValue) {
@@ -2567,70 +2956,91 @@ async function pollVerificationCodeWithAutoResend(options) {
 }
 
 async function executeStep4(state) {
-  const pollPayload = {
-    filterAfterTimestamp: state.flowStartTime || 0,
-    senderFilters: ['openai', 'noreply', 'verify', 'auth', 'forward'],
-    subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm'],
-    targetEmail: state.email,
-    maxAttempts: 20,
-    intervalMs: 3000,
-  };
+  const maxSwitchRounds = 5;
 
-  const mail = getMailConfig(state);
-  if (mail.error) throw new Error(mail.error);
+  for (let round = 1; round <= maxSwitchRounds; round++) {
+    const current = await getState();
+    const pollPayload = {
+      filterAfterTimestamp: current.flowStartTime || state.flowStartTime || 0,
+      senderFilters: ['openai', 'noreply', 'verify', 'auth', 'forward'],
+      subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm'],
+      targetEmail: current.email,
+      maxAttempts: 20,
+      intervalMs: 3000,
+    };
 
-  if (mail.usesApi) {
-    await addLog(`Step 4: Polling verification code via ${mail.label}...`);
-    await pollVerificationCodeWithAutoResend({
-      step: 4,
-      mail,
-      pollPayload,
-      successMessage: 'Got verification code',
-      successSelectors: [
-        'input[name="name"]',
-        'input[placeholder*="全名"]',
-        '[role="spinbutton"][data-type="year"]',
-        'input[name="birthday"]',
-        'input[name="age"]',
-      ],
-      customPoll: (currentPayload) => pollMicrosoftManagerCode(state, 4, currentPayload),
-    });
-    return;
-  }
+    const mail = getMailConfig(current);
+    if (mail.error) throw new Error(mail.error);
 
-  await addLog(`Step 4: Opening ${mail.label}...`);
+    try {
+      if (mail.usesApi) {
+        await addLog(`Step 4: Polling verification code via ${mail.label}...`);
+        await pollVerificationCodeWithAutoResend({
+          step: 4,
+          mail,
+          pollPayload,
+          successMessage: 'Got verification code',
+          successSelectors: [
+            'input[name="name"]',
+            'input[placeholder*="全名"]',
+            '[role="spinbutton"][data-type="year"]',
+            'input[name="birthday"]',
+            'input[name="age"]',
+          ],
+          customPoll: (currentPayload) => pollMicrosoftManagerCode(current, 4, currentPayload),
+        });
+        return;
+      }
 
-  const alive = await isTabAlive(mail.source);
-  if (alive) {
-    if (mail.navigateOnReuse) {
-      await reuseOrCreateTab(mail.source, mail.url, {
-        inject: mail.inject,
-        injectSource: mail.injectSource,
+      await addLog(`Step 4: Opening ${mail.label}...`);
+
+      const alive = await isTabAlive(mail.source);
+      if (alive) {
+        if (mail.navigateOnReuse) {
+          await reuseOrCreateTab(mail.source, mail.url, {
+            inject: mail.inject,
+            injectSource: mail.injectSource,
+          });
+        } else {
+          const tabId = await getTabId(mail.source);
+          await chrome.tabs.update(tabId, { active: true });
+        }
+      } else {
+        await reuseOrCreateTab(mail.source, mail.url, {
+          inject: mail.inject,
+          injectSource: mail.injectSource,
+        });
+      }
+
+      await pollVerificationCodeWithAutoResend({
+        step: 4,
+        mail,
+        pollPayload,
+        successMessage: 'Got verification code',
+        successSelectors: [
+          'input[name="name"]',
+          'input[placeholder*="全名"]',
+          '[role="spinbutton"][data-type="year"]',
+          'input[name="birthday"]',
+          'input[name="age"]',
+        ],
       });
-    } else {
-      const tabId = await getTabId(mail.source);
-      await chrome.tabs.update(tabId, { active: true });
-    }
-  } else {
-    await reuseOrCreateTab(mail.source, mail.url, {
-      inject: mail.inject,
-      injectSource: mail.injectSource,
-    });
-  }
+      return;
+    } catch (err) {
+      if (!isMicrosoftServiceAbuseError(err)) {
+        throw err;
+      }
 
-  await pollVerificationCodeWithAutoResend({
-    step: 4,
-    mail,
-    pollPayload,
-    successMessage: 'Got verification code',
-    successSelectors: [
-      'input[name="name"]',
-      'input[placeholder*="全名"]',
-      '[role="spinbutton"][data-type="year"]',
-      'input[name="birthday"]',
-      'input[name="age"]',
-    ],
-  });
+      if (round >= maxSwitchRounds) {
+        throw new Error(`Step 4: ${getErrorMessage(err)}. Reached maximum blocked-account retry rounds (${maxSwitchRounds}).`);
+      }
+
+      await handleMicrosoftServiceAbuseDuringStep4(current, {
+        round,
+        maxRounds: maxSwitchRounds,
+      });
+    }
+  }
 }
 
 // ============================================================
@@ -2651,159 +3061,6 @@ async function executeStep5(state) {
   });
 }
 
-async function refreshOAuthIfTimedOutBeforeStep6(state) {
-  if (isSub2apiOauthProvider(state)) {
-    return state;
-  }
-
-  if (!state.vpsUrl) {
-    return state;
-  }
-
-  await addLog('Step 6: Checking CPA Auth status before login...');
-
-  try {
-    await reuseOrCreateTab('vps-panel', state.vpsUrl, {
-      inject: ['content/utils.js', 'content/vps-panel.js'],
-      injectSource: 'vps-panel',
-    });
-
-    const response = await sendToContentScript('vps-panel', {
-      type: 'CHECK_OAUTH_TIMEOUT_STATUS',
-      source: 'background',
-    });
-
-    if (response?.error) {
-      throw new Error(response.error);
-    }
-
-    if (!response?.timedOut) {
-      return state;
-    }
-
-    const timeoutText = response.statusText || '认证失败: Timeout waiting for OAuth callback';
-    await addLog(`Step 6: CPA Auth reported OAuth timeout. Refreshing OAuth link... (${timeoutText})`, 'warn');
-
-    await executeStepAndWait(1, 1500);
-
-    const refreshedState = await getState();
-    if (!refreshedState.oauthUrl) {
-      throw new Error('Step 1 completed but no new OAuth URL was saved.');
-    }
-
-    await addLog('Step 6: New OAuth link obtained after timeout. Continuing login...', 'ok');
-    return refreshedState;
-  } catch (err) {
-    await addLog(`Step 6: CPA Auth timeout check could not be completed, continuing with current OAuth URL. ${getErrorMessage(err)}`, 'warn');
-    return state;
-  }
-}
-
-// ============================================================
-// Step 6: Login ChatGPT (Background opens tab, chatgpt.js handles login)
-// ============================================================
-
-async function executeStep6(state) {
-  state = await refreshOAuthIfTimedOutBeforeStep6(state);
-
-  if (!state.oauthUrl) {
-    throw new Error('No OAuth URL. Complete step 1 first.');
-  }
-  if (!state.email) {
-    throw new Error('No email. Complete step 3 first.');
-  }
-
-  await addLog(`Step 6: Opening OAuth URL for login...`);
-  // Reuse the signup-page tab — navigate it to the OAuth URL
-  await reuseOrCreateTab('signup-page', state.oauthUrl);
-
-  // signup-page.js will inject (same auth.openai.com domain) and handle login
-  await sendToContentScript('signup-page', {
-    type: 'EXECUTE_STEP',
-    step: 6,
-    source: 'background',
-    payload: { email: state.email, password: state.password },
-  });
-
-  await waitForSignupSurface({
-    step: 6,
-    selectors: [
-      'input[name="code"]',
-      'input[name="otp"]',
-      'input[maxlength="1"]',
-      'button[type="submit"][data-dd-action-name="Continue"]',
-      'button[type="submit"]._primary_3rdp0_107',
-    ],
-  });
-}
-
-// ============================================================
-// Step 7: Get Login Verification Code (Microsoft Account Manager API)
-// ============================================================
-
-async function executeStep7(state) {
-  const pollPayload = {
-    filterAfterTimestamp: state.lastEmailTimestamp || state.flowStartTime || 0,
-    senderFilters: ['openai', 'noreply', 'verify', 'auth', 'chatgpt', 'forward'],
-    subjectFilters: ['verify', 'verification', 'code', '验证', 'confirm', 'login'],
-    targetEmail: state.email,
-    maxAttempts: 20,
-    intervalMs: 3000,
-  };
-
-  const mail = getMailConfig(state);
-  if (mail.error) throw new Error(mail.error);
-
-  if (mail.usesApi) {
-    await addLog(`Step 7: Polling login code via ${mail.label}...`);
-    await pollVerificationCodeWithAutoResend({
-      step: 7,
-      mail,
-      pollPayload,
-      successMessage: 'Got login verification code',
-      successSelectors: [
-        'button[type="submit"][data-dd-action-name="Continue"]',
-        'button[type="submit"]._primary_3rdp0_107',
-        'button[aria-label*="Continue"]',
-      ],
-      customPoll: (currentPayload) => pollMicrosoftManagerCode(state, 7, currentPayload),
-    });
-    return;
-  }
-
-  await addLog(`Step 7: Opening ${mail.label}...`);
-
-  const alive = await isTabAlive(mail.source);
-  if (alive) {
-    if (mail.navigateOnReuse) {
-      await reuseOrCreateTab(mail.source, mail.url, {
-        inject: mail.inject,
-        injectSource: mail.injectSource,
-      });
-    } else {
-      const tabId = await getTabId(mail.source);
-      await chrome.tabs.update(tabId, { active: true });
-    }
-  } else {
-    await reuseOrCreateTab(mail.source, mail.url, {
-      inject: mail.inject,
-      injectSource: mail.injectSource,
-    });
-  }
-
-  await pollVerificationCodeWithAutoResend({
-    step: 7,
-    mail,
-    pollPayload,
-    successMessage: 'Got login verification code',
-    successSelectors: [
-      'button[type="submit"][data-dd-action-name="Continue"]',
-      'button[type="submit"]._primary_3rdp0_107',
-      'button[aria-label*="Continue"]',
-    ],
-  });
-}
-
 // ============================================================
 // Step 8: Complete OAuth (auto click + localhost listener)
 // ============================================================
@@ -2813,15 +3070,108 @@ let webNavListener = null;
 function isLocalCallbackUrl(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
-    return ['localhost', '127.0.0.1', '[::1]', '::1'].includes(parsed.hostname);
+    const isLocalHost = ['localhost', '127.0.0.1', '[::1]', '::1'].includes(parsed.hostname);
+    if (!isLocalHost) return false;
+
+    const code = String(parsed.searchParams.get('code') || '').trim();
+    const state = String(parsed.searchParams.get('state') || '').trim();
+    const error = String(parsed.searchParams.get('error') || '').trim();
+
+    if (code && state) return true;
+    if (error) return true;
+
+    // Guardrail: reject unrelated localhost pages (e.g. CPA dashboard at localhost:8080).
+    // Callback URLs should carry OAuth query params.
+    return false;
   } catch {
     return false;
   }
 }
 
+function getPostLoginSurfaceFlagsFromUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    const pathname = String(parsed.pathname || '').toLowerCase();
+    return {
+      isConsentPage: /\/sign-in-with-chatgpt\/codex\/consent/.test(pathname),
+      isAboutYouPage: /\/about-you/.test(pathname),
+      isCallbackUrl: isLocalCallbackUrl(parsed.toString()),
+      url: parsed.toString(),
+    };
+  } catch {
+    return {
+      isConsentPage: false,
+      isAboutYouPage: false,
+      isCallbackUrl: false,
+      url: '',
+    };
+  }
+}
+
+async function findExistingLocalCallbackUrl(state = null) {
+  const currentState = state || await getState();
+
+  const stateUrl = String(currentState?.localhostUrl || '').trim();
+  if (isLocalCallbackUrl(stateUrl)) {
+    return stateUrl;
+  }
+
+  const signupTabId = await getTabId('signup-page');
+  if (signupTabId) {
+    try {
+      const signupTab = await chrome.tabs.get(signupTabId);
+      const signupUrl = String(signupTab?.url || signupTab?.pendingUrl || '').trim();
+      if (isLocalCallbackUrl(signupUrl)) {
+        return signupUrl;
+      }
+    } catch {}
+  }
+
+  const tabs = await chrome.tabs.query({});
+  tabs.sort((a, b) => Number(b?.lastAccessed || 0) - Number(a?.lastAccessed || 0));
+
+  for (const tab of tabs) {
+    const candidateUrl = String(tab?.url || tab?.pendingUrl || '').trim();
+    if (isLocalCallbackUrl(candidateUrl)) {
+      return candidateUrl;
+    }
+  }
+
+  return '';
+}
+
+async function finalizeStep8WithCallbackUrl(callbackUrl) {
+  await setState({ localhostUrl: callbackUrl });
+
+  let callbackError = '';
+  let callbackErrorDescription = '';
+  try {
+    const parsed = new URL(callbackUrl);
+    callbackError = String(parsed.searchParams.get('error') || '').trim();
+    callbackErrorDescription = String(parsed.searchParams.get('error_description') || '').trim();
+  } catch {}
+
+  if (callbackError) {
+    const detail = callbackErrorDescription || callbackError;
+    throw new Error(
+      `OAuth callback returned error: ${detail}. Usually this means OAuth session/CSRF mismatch. Please rerun from step 1 to get a fresh OAuth URL, then continue.`
+    );
+  }
+
+  await addLog(`Step 8: Captured localhost URL: ${callbackUrl}`, 'ok');
+  await completeBackgroundStep(8, { localhostUrl: callbackUrl });
+}
+
 async function executeStep8(state) {
   if (!state.oauthUrl) {
     throw new Error('No OAuth URL. Complete step 1 first.');
+  }
+
+  const existingCallbackUrl = await findExistingLocalCallbackUrl(state);
+  if (existingCallbackUrl) {
+    await addLog('Step 8: Existing localhost callback already detected. Reusing it.', 'warn');
+    await finalizeStep8WithCallbackUrl(existingCallbackUrl);
+    return;
   }
 
   await addLog('Step 8: Setting up localhost redirect listener...');
@@ -2842,8 +3192,23 @@ async function executeStep8(state) {
     };
 
     const timeout = setTimeout(() => {
-      cleanupListener();
-      reject(new Error('Localhost redirect not captured after 120s. Step 8 click may have been blocked.'));
+      (async () => {
+        if (resolved) return;
+
+        try {
+          const callbackUrl = await findExistingLocalCallbackUrl();
+          if (callbackUrl) {
+            resolved = true;
+            cleanupListener();
+            await finalizeStep8WithCallbackUrl(callbackUrl);
+            resolve();
+            return;
+          }
+        } catch {}
+
+        cleanupListener();
+        reject(new Error('Localhost redirect not captured after 120s. Step 8 click may have been blocked.'));
+      })();
     }, 120000);
 
     webNavListener = (details) => {
@@ -2859,27 +3224,7 @@ async function executeStep8(state) {
 
       (async () => {
         try {
-          await setState({ localhostUrl: details.url });
-
-          let callbackError = '';
-          let callbackErrorDescription = '';
-          try {
-            const parsed = new URL(details.url);
-            callbackError = String(parsed.searchParams.get('error') || '').trim();
-            callbackErrorDescription = String(parsed.searchParams.get('error_description') || '').trim();
-          } catch {}
-
-          if (callbackError) {
-            const detail = callbackErrorDescription || callbackError;
-            throw new Error(
-              `OAuth callback returned error: ${detail}. Usually this means OAuth session/CSRF mismatch. Please rerun from step 1 to get a fresh OAuth URL, then continue.`
-            );
-          }
-
-          await addLog(`Step 8: Captured localhost URL: ${details.url}`, 'ok');
-          await setStepStatus(8, 'completed');
-          notifyStepComplete(8, { localhostUrl: details.url });
-          broadcastDataUpdate({ localhostUrl: details.url });
+          await finalizeStep8WithCallbackUrl(details.url);
           resolve();
         } catch (err) {
           reject(err);
@@ -2889,50 +3234,108 @@ async function executeStep8(state) {
 
     chrome.webNavigation.onBeforeNavigate.addListener(webNavListener);
 
-    // After step 7, the auth page shows a consent screen ("使用 ChatGPT 登录到 Codex")
-    // with a "继续" button. We locate the button in-page, then click it through
-    // the debugger Input API directly.
+    // Step 8 runs on the consent screen ("使用 ChatGPT 登录到 Codex").
+    // The new flow may briefly stay on "/about-you" first.
     (async () => {
       try {
         let signupTabId = await getTabId('signup-page');
         if (signupTabId) {
           await chrome.tabs.update(signupTabId, { active: true });
-          await addLog('Step 8: Switched to auth page. Preparing debugger click...');
+          await addLog('Step 8: Switched to auth page. Preparing continue click...');
         } else {
           signupTabId = await reuseOrCreateTab('signup-page', state.oauthUrl);
-          await addLog('Step 8: Auth tab reopened. Preparing debugger click...');
+          await addLog('Step 8: Auth tab reopened. Preparing continue click...');
         }
 
-        const clickResult = await sendToContentScript('signup-page', {
-          type: 'STEP8_FIND_AND_CLICK',
-          source: 'background',
-          payload: {},
-        });
+        async function requestStep8Click(payload = {}) {
+          try {
+            return await sendToContentScript('signup-page', {
+              type: 'STEP8_FIND_AND_CLICK',
+              source: 'background',
+              payload,
+            });
+          } catch (sendErr) {
+            const sendMessage = getErrorMessage(sendErr);
+            const disconnected = /receiving end does not exist|could not establish connection/i.test(sendMessage);
+            if (!disconnected) {
+              throw sendErr;
+            }
+
+            await addLog('Step 8: Auth page helper disconnected, reinjecting and retrying...', 'warn');
+            await chrome.scripting.executeScript({
+              target: { tabId: signupTabId },
+              files: ['content/utils.js', 'content/signup-page.js'],
+            });
+            await new Promise((r) => setTimeout(r, 350));
+            return chrome.tabs.sendMessage(signupTabId, {
+              type: 'STEP8_FIND_AND_CLICK',
+              source: 'background',
+              payload,
+            });
+          }
+        }
+
+        let clickResult = await requestStep8Click({ dryRun: false });
 
         if (clickResult?.error) {
           throw new Error(clickResult.error);
         }
 
+        if (!clickResult?.isConsentPage) {
+          await addLog('Step 8: Current page is not consent yet (likely /about-you). Continue clicked once, waiting for consent page...', 'warn');
+
+          await waitForSignupSurface({
+            step: 8,
+            selectors: getOauthConsentSurfaceSelectors(),
+            timeout: 20000,
+          }, 20000);
+
+          if (!resolved) {
+            clickResult = await requestStep8Click({ dryRun: false });
+            if (clickResult?.error) {
+              throw new Error(clickResult.error);
+            }
+          }
+        }
+
         if (!resolved) {
-          await clickWithDebugger(signupTabId, clickResult?.rect);
-          await addLog('Step 8: Debugger click dispatched, waiting for redirect...');
+          if (clickResult?.directClicked) {
+            await addLog('Step 8: Continue button clicked. Waiting for localhost redirect...', 'ok');
+            await sleepWithStop(1400);
+          }
+
+          if (!resolved) {
+            await clickWithDebugger(signupTabId, clickResult?.rect);
+            await addLog('Step 8: Debugger click dispatched as fallback, waiting for redirect...');
+          }
         }
       } catch (err) {
-        clearTimeout(timeout);
-        cleanupListener();
-        reject(err);
+        if (resolved) {
+          return;
+        }
+
+        const message = getErrorMessage(err);
+        await addLog(
+          `Step 8: Auto click was not completed (${message}). Please click consent manually; still waiting for localhost redirect...`,
+          'warn'
+        );
       }
     })();
   });
 }
 
 // ============================================================
-// Step 9: CPA Auth Verify (via vps-panel.js)
+// Step 9: Callback verify/import (CPA API / CPA panel / Sub2API)
 // ============================================================
 
 async function executeStep9(state) {
   if (isSub2apiOauthProvider(state)) {
     await executeStep9WithSub2api(state);
+    return;
+  }
+
+  if (shouldUseCpaManagementApi(state)) {
+    await executeStep9WithCpaApi(state);
     return;
   }
 
@@ -2979,6 +3382,62 @@ async function executeStep9(state) {
     step: 9,
     source: 'background',
     payload: { localhostUrl: state.localhostUrl },
+  });
+}
+
+async function executeStep9WithCpaApi(state) {
+  if (!state.localhostUrl) {
+    throw new Error('No localhost URL. Complete step 8 first.');
+  }
+
+  const callback = parseOAuthCallbackParams(state.localhostUrl);
+
+  let oauthState = String(state.cpaAuthState || '').trim();
+  if (!oauthState) {
+    oauthState = callback.state;
+  }
+
+  if (!oauthState) {
+    throw new Error('No CPA OAuth state found. Please rerun step 1 first.');
+  }
+
+  if (callback.state && callback.state !== oauthState) {
+    await addLog(`Step 9: Callback state (${callback.state}) differs from stored CPA state (${oauthState}). Using callback state.`, 'warn');
+    oauthState = callback.state;
+  }
+
+  await addLog('Step 9: Forwarding OAuth callback to CPA Management API...');
+  try {
+    await requestCpaManagementApi(state, 'oauth-callback', {
+      method: 'POST',
+      body: {
+        provider: 'codex',
+        redirect_url: callback.callbackUrl,
+        code: callback.code,
+        state: oauthState,
+        error: '',
+      },
+    });
+  } catch (err) {
+    const message = getErrorMessage(err);
+    if (/already|duplicate|exists|processed|handled/i.test(message)) {
+      await addLog(`Step 9: Callback already submitted (${message}). Continue polling status...`, 'warn');
+    } else {
+      throw err;
+    }
+  }
+
+  await addLog('Step 9: Confirming OAuth completion via CPA Management API...');
+  await waitForCpaAuthStatusReady(state, oauthState, {
+    maxAttempts: 40,
+    intervalMs: 2000,
+  });
+
+  await setState({ cpaAuthState: null });
+  await addLog('Step 9: CPA import/authentication completed.', 'ok');
+
+  await completeBackgroundStep(9, {
+    cpaAuthState: oauthState,
   });
 }
 

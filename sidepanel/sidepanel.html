@@ -62,6 +62,10 @@
           <button id="btn-paste-vps-url" class="btn btn-outline btn-sm" type="button" data-i18n="btnPaste">Paste</button>
         </div>
       </div>
+      <div class="data-row" id="row-cpa-auth-key">
+        <span class="data-label" data-i18n="labelCpaManagementKey">CPA Key</span>
+        <input type="password" id="input-cpa-management-key" class="data-input" placeholder="Plaintext CPA Management Key" data-i18n-placeholder="placeholderCpaManagementKey" />
+      </div>
       <div class="data-row" id="row-sub2api-base-url" style="display:none;">
         <span class="data-label" data-i18n="labelSub2api">Sub2API</span>
         <input type="text" id="input-sub2api-base-url" class="data-input" placeholder="https://your-sub2api-host" data-i18n-placeholder="placeholderSub2apiBaseUrl" />
@@ -86,6 +90,13 @@
         <label class="option-toggle" for="checkbox-auto-delete-icloud">
           <input type="checkbox" id="checkbox-auto-delete-icloud" />
           <span data-i18n="cleanupAutoDelete">Delete iCloud alias after successful use</span>
+        </label>
+      </div>
+      <div class="data-row">
+        <span class="data-label" data-i18n="labelBlockedAccountPolicy">封号处理</span>
+        <label class="option-toggle" for="checkbox-delete-blocked-account">
+          <input type="checkbox" id="checkbox-delete-blocked-account" />
+          <span data-i18n="blockedAccountPolicy">邮箱被封时删除账号；未勾选则跳过并换号</span>
         </label>
       </div>
       <div class="data-row" id="row-mail-provider">
@@ -195,7 +206,7 @@
   <section id="steps-section">
     <div class="steps-header">
       <span class="section-label" data-i18n="sectionWorkflow">Workflow</span>
-      <span id="steps-progress" class="steps-progress">0 / 10</span>
+      <span id="steps-progress" class="steps-progress">0 / 8</span>
     </div>
     <div class="steps-list">
       <div class="step-row" data-step="1">
@@ -228,32 +239,20 @@
         <button class="step-skip-btn btn btn-ghost btn-xs" data-step="5" type="button" title="Skip this step" data-i18n-title="titleSkipStep" data-i18n="btnSkip">Skip</button>
         <span class="step-status" data-step="5"></span>
       </div>
-      <div class="step-row" data-step="6">
-        <div class="step-indicator" data-step="6"><span class="step-num">6</span></div>
-        <button class="step-btn" data-step="6" data-i18n="step6">Login via OAuth</button>
-        <button class="step-skip-btn btn btn-ghost btn-xs" data-step="6" type="button" title="Skip this step" data-i18n-title="titleSkipStep" data-i18n="btnSkip">Skip</button>
-        <span class="step-status" data-step="6"></span>
-      </div>
-      <div class="step-row" data-step="7">
-        <div class="step-indicator" data-step="7"><span class="step-num">7</span></div>
-        <button class="step-btn" data-step="7" data-i18n="step7">Get Login Code</button>
-        <button class="step-skip-btn btn btn-ghost btn-xs" data-step="7" type="button" title="Skip this step" data-i18n-title="titleSkipStep" data-i18n="btnSkip">Skip</button>
-        <span class="step-status" data-step="7"></span>
-      </div>
       <div class="step-row" data-step="8">
-        <div class="step-indicator" data-step="8"><span class="step-num">8</span></div>
+        <div class="step-indicator" data-step="8"><span class="step-num">6</span></div>
         <button class="step-btn" data-step="8" data-i18n="step8">OAuth Auto Confirm</button>
         <button class="step-skip-btn btn btn-ghost btn-xs" data-step="8" type="button" title="Skip this step" data-i18n-title="titleSkipStep" data-i18n="btnSkip">Skip</button>
         <span class="step-status" data-step="8"></span>
       </div>
       <div class="step-row" data-step="9">
-        <div class="step-indicator" data-step="9"><span class="step-num">9</span></div>
+        <div class="step-indicator" data-step="9"><span class="step-num">7</span></div>
         <button class="step-btn" data-step="9" data-i18n="step9">Callback Verify / Import</button>
         <button class="step-skip-btn btn btn-ghost btn-xs" data-step="9" type="button" title="Skip this step" data-i18n-title="titleSkipStep" data-i18n="btnSkip">Skip</button>
         <span class="step-status" data-step="9"></span>
       </div>
       <div class="step-row" data-step="10">
-        <div class="step-indicator" data-step="10"><span class="step-num">10</span></div>
+        <div class="step-indicator" data-step="10"><span class="step-num">8</span></div>
         <button class="step-btn" data-step="10" data-i18n="step10">Cleanup Source Email</button>
         <button class="step-skip-btn btn btn-ghost btn-xs" data-step="10" type="button" title="Skip this step" data-i18n-title="titleSkipStep" data-i18n="btnSkip">Skip</button>
         <span class="step-status" data-step="10"></span>

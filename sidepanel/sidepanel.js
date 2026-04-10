@@ -8,7 +8,26 @@ const STATUS_ICONS = {
   failed: '\u2717',     // ✗
   stopped: '\u25A0',    // ■
 };
-const TOTAL_STEPS = 10;
+const WORKFLOW_STEPS = [1, 2, 3, 4, 5, 8, 9, 10];
+const TOTAL_STEPS = WORKFLOW_STEPS.length;
+const PREVIOUS_WORKFLOW_STEP = WORKFLOW_STEPS.reduce((acc, step, index) => {
+  acc[step] = index > 0 ? WORKFLOW_STEPS[index - 1] : null;
+  return acc;
+}, {});
+const DISPLAY_STEP_INDEX = WORKFLOW_STEPS.reduce((acc, step, index) => {
+  acc[step] = index + 1;
+  return acc;
+}, {});
+
+function toDisplayStep(step) {
+  const value = Number(step);
+  if (!Number.isFinite(value)) return step;
+  return DISPLAY_STEP_INDEX[value] || value;
+}
+
+function replaceStepNumberForDisplay(text) {
+  return String(text || '').replace(/\bStep\s+(\d+)\b/g, (_, step) => `Step ${toDisplayStep(step)}`);
+}
 
 const logArea = document.getElementById('log-area');
 const displayOauthUrl = document.getElementById('display-oauth-url');
@@ -31,6 +50,7 @@ const btnIcloudLoginDone = document.getElementById('btn-icloud-login-done');
 const btnIcloudRefresh = document.getElementById('btn-icloud-refresh');
 const btnIcloudDeleteUsed = document.getElementById('btn-icloud-delete-used');
 const checkboxAutoDeleteIcloud = document.getElementById('checkbox-auto-delete-icloud');
+const checkboxDeleteBlockedAccount = document.getElementById('checkbox-delete-blocked-account');
 const aliasSourceValue = document.querySelector('.data-row .data-value[data-i18n="icloudAliasName"]');
 const rowMailProvider = document.getElementById('row-mail-provider');
 const inputEmail = document.getElementById('input-email');
@@ -51,6 +71,8 @@ const selectOauthProvider = document.getElementById('select-oauth-provider');
 const rowCpaAuthUrl = document.getElementById('row-cpa-auth-url');
 const inputVpsUrl = document.getElementById('input-vps-url');
 const btnPasteVpsUrl = document.getElementById('btn-paste-vps-url');
+const rowCpaAuthKey = document.getElementById('row-cpa-auth-key');
+const inputCpaManagementKey = document.getElementById('input-cpa-management-key');
 const rowSub2apiBaseUrl = document.getElementById('row-sub2api-base-url');
 const inputSub2apiBaseUrl = document.getElementById('input-sub2api-base-url');
 const rowSub2apiApiKey = document.getElementById('row-sub2api-api-key');
@@ -128,6 +150,7 @@ const I18N = {
     labelLanguage: '语言',
     labelAlias: '别名',
     labelCleanup: '清理',
+    labelBlockedAccountPolicy: '封号处理',
     labelVerify: '验证',
     labelInbucket: 'Inbucket',
     labelMailbox: '邮箱名',
@@ -135,6 +158,7 @@ const I18N = {
     labelToken: '令牌',
     labelMode: '模式',
     labelKeyword: '筛选',
+    labelCpaManagementKey: 'CPA Key',
     labelSub2api: 'Sub2API',
     labelSub2apiApiKey: 'API Key',
     labelEmail: '邮箱',
@@ -147,6 +171,7 @@ const I18N = {
     icloudAliasName: 'iCloud Hide My Email',
     microsoftManagerEmailName: 'Microsoft 账号',
     cleanupAutoDelete: '成功使用后自动删除来源邮箱',
+    blockedAccountPolicy: '邮箱被封 (AADSTS70000) 时删除账号；未勾选则跳过并换号',
     mailProvider163: '163 邮箱 (mail.163.com)',
     mailProviderQq: 'QQ 邮箱 (wx.mail.qq.com)',
     mailProviderInbucket: 'Inbucket（自定义主机）',
@@ -155,7 +180,8 @@ const I18N = {
     microsoftManagerModeImap: 'IMAP',
     oauthProviderCpaAuth: 'CPA Auth',
     oauthProviderSub2api: 'Sub2API',
-    placeholderCpaAuth: 'http://ip:port/management.html#/oauth',
+    placeholderCpaAuth: 'http://ip:port 或 /management.html#/oauth',
+    placeholderCpaManagementKey: '填写明文 Management Key（不要填 $2... 加密串）',
     placeholderSub2apiBaseUrl: 'https://你的-sub2api域名',
     placeholderSub2apiApiKey: '可留空；或填写 x-api-key / Bearer token',
     placeholderInbucketHost: '你的 inbucket 主机或 https://你的主机',
@@ -190,8 +216,6 @@ const I18N = {
     step3: '填写邮箱 / 密码',
     step4: '获取注册验证码',
     step5: '填写姓名 / 生日',
-    step6: '通过 OAuth 登录',
-    step7: '获取登录验证码',
     step8: 'OAuth 自动确认',
     step9: '回调验证 / 导入',
     step10: '清理来源邮箱',
@@ -266,6 +290,7 @@ const I18N = {
     labelLanguage: 'Language',
     labelAlias: 'Alias',
     labelCleanup: 'Cleanup',
+    labelBlockedAccountPolicy: 'Blocked Handling',
     labelVerify: 'Verify',
     labelInbucket: 'Inbucket',
     labelMailbox: 'Mailbox',
@@ -273,6 +298,7 @@ const I18N = {
     labelToken: 'Token',
     labelMode: 'Mode',
     labelKeyword: 'Filter',
+    labelCpaManagementKey: 'CPA Key',
     labelSub2api: 'Sub2API',
     labelSub2apiApiKey: 'API Key',
     labelEmail: 'Email',
@@ -285,6 +311,7 @@ const I18N = {
     icloudAliasName: 'iCloud Hide My Email',
     microsoftManagerEmailName: 'Microsoft account',
     cleanupAutoDelete: 'Delete source email after successful use',
+    blockedAccountPolicy: 'On AADSTS70000: checked=delete account, unchecked=skip and switch to next',
     mailProvider163: '163 Mail (mail.163.com)',
     mailProviderQq: 'QQ Mail (wx.mail.qq.com)',
     mailProviderInbucket: 'Inbucket (custom host)',
@@ -293,7 +320,8 @@ const I18N = {
     microsoftManagerModeImap: 'IMAP',
     oauthProviderCpaAuth: 'CPA Auth',
     oauthProviderSub2api: 'Sub2API',
-    placeholderCpaAuth: 'http://ip:port/management.html#/oauth',
+    placeholderCpaAuth: 'http://ip:port or /management.html#/oauth',
+    placeholderCpaManagementKey: 'Plaintext management key (not $2... hash)',
     placeholderSub2apiBaseUrl: 'https://your-sub2api-host',
     placeholderSub2apiApiKey: 'Optional; use x-api-key or Bearer token',
     placeholderInbucketHost: 'your inbucket host or https://your-host',
@@ -328,8 +356,6 @@ const I18N = {
     step3: 'Fill Email / Password',
     step4: 'Get Signup Code',
     step5: 'Fill Name / Birthday',
-    step6: 'Login via OAuth',
-    step7: 'Get Login Code',
     step8: 'OAuth Auto Confirm',
     step9: 'Callback Verify / Import',
     step10: 'Cleanup Source Email',
@@ -726,6 +752,7 @@ function isSub2apiOauthProviderSelected() {
 function updateOauthProviderUI() {
   const useSub2api = isSub2apiOauthProviderSelected();
   rowCpaAuthUrl.style.display = useSub2api ? 'none' : '';
+  rowCpaAuthKey.style.display = useSub2api ? 'none' : '';
   rowSub2apiBaseUrl.style.display = useSub2api ? '' : 'none';
   rowSub2apiApiKey.style.display = useSub2api ? '' : 'none';
 }
@@ -864,6 +891,9 @@ async function restoreState() {
     if (state.vpsUrl) {
       inputVpsUrl.value = state.vpsUrl;
     }
+    if (state.cpaManagementKey) {
+      inputCpaManagementKey.value = state.cpaManagementKey;
+    }
     if (state.oauthProvider) {
       selectOauthProvider.value = state.oauthProvider;
     }
@@ -874,6 +904,7 @@ async function restoreState() {
       inputSub2apiApiKey.value = state.sub2apiAdminApiKey;
     }
     checkboxAutoDeleteIcloud.checked = Boolean(state.autoDeleteUsedIcloudAlias);
+    checkboxDeleteBlockedAccount.checked = Boolean(state.deleteAbusedMicrosoftAccount);
     if (state.language) {
       selectLanguage.value = state.language;
     }
@@ -973,8 +1004,10 @@ async function syncRuntimeSettingsBeforeExecution() {
     payload: {
       oauthProvider: selectOauthProvider.value,
       vpsUrl: inputVpsUrl.value.trim(),
+      cpaManagementKey: inputCpaManagementKey.value.trim(),
       sub2apiBaseUrl: inputSub2apiBaseUrl.value.trim(),
       sub2apiAdminApiKey: inputSub2apiApiKey.value.trim(),
+      deleteAbusedMicrosoftAccount: checkboxDeleteBlockedAccount.checked,
       customPassword: inputPassword.value,
       mailProvider: normalizeMailProviderValue(selectMailProvider.value),
       inbucketHost: inputInbucketHost.value.trim(),
@@ -1004,6 +1037,10 @@ function updateStepUI(step, status) {
   updateProgressCounter();
 }
 
+function getVisibleStepEntries(stepStatuses = {}) {
+  return WORKFLOW_STEPS.map((step) => [step, stepStatuses?.[step] || 'pending']);
+}
+
 function updateProgressCounter() {
   let completed = 0;
   document.querySelectorAll('.step-row').forEach(row => {
@@ -1026,20 +1063,21 @@ function updateButtonStates() {
 
   const anyRunning = Object.values(statuses).some(s => s === 'running');
 
-  for (let step = 1; step <= TOTAL_STEPS; step++) {
+  for (const step of WORKFLOW_STEPS) {
     const btn = document.querySelector(`.step-btn[data-step="${step}"]`);
     const skipBtn = document.querySelector(`.step-skip-btn[data-step="${step}"]`);
     if (!btn) continue;
 
     const currentStatus = statuses[step];
+    const prevStep = PREVIOUS_WORKFLOW_STEP[step];
 
     if (anyRunning) {
       btn.disabled = true;
       if (skipBtn) skipBtn.disabled = true;
-    } else if (step === 1) {
+    } else if (prevStep === null) {
       btn.disabled = false;
     } else {
-      const prevStatus = statuses[step - 1];
+      const prevStatus = statuses[prevStep];
       btn.disabled = !(
         prevStatus === 'completed'
         || prevStatus === 'skipped'
@@ -1066,47 +1104,47 @@ function updateStatusDisplay(state) {
   if (!state || !state.stepStatuses) return;
   lastKnownState = state;
   syncRunMetricsFromState(state);
+  const visibleEntries = getVisibleStepEntries(state.stepStatuses);
 
   statusBar.className = 'status-bar';
 
-  const running = Object.entries(state.stepStatuses).find(([, s]) => s === 'running');
+  const running = visibleEntries.find(([, s]) => s === 'running');
   if (running) {
-    displayStatus.textContent = t('statusRunning', { step: running[0] });
+    displayStatus.textContent = t('statusRunning', { step: toDisplayStep(running[0]) });
     statusBar.classList.add('running');
     return;
   }
 
-  const failed = Object.entries(state.stepStatuses).find(([, s]) => s === 'failed');
+  const failed = visibleEntries.find(([, s]) => s === 'failed');
   if (failed) {
-    displayStatus.textContent = t('statusFailed', { step: failed[0] });
+    displayStatus.textContent = t('statusFailed', { step: toDisplayStep(failed[0]) });
     statusBar.classList.add('failed');
     return;
   }
 
-  const stopped = Object.entries(state.stepStatuses).find(([, s]) => s === 'stopped');
+  const stopped = visibleEntries.find(([, s]) => s === 'stopped');
   if (stopped) {
-    displayStatus.textContent = t('statusStopped', { step: stopped[0] });
+    displayStatus.textContent = t('statusStopped', { step: toDisplayStep(stopped[0]) });
     statusBar.classList.add('stopped');
     return;
   }
 
-  const entries = Object.entries(state.stepStatuses);
-  const allProgressed = entries.every(([, s]) => s === 'completed' || s === 'skipped');
+  const allProgressed = visibleEntries.every(([, s]) => s === 'completed' || s === 'skipped');
   if (allProgressed) {
     displayStatus.textContent = t('statusAllFinished');
     statusBar.classList.add('completed');
     return;
   }
 
-  const lastProgressed = entries
+  const lastProgressed = visibleEntries
     .filter(([, s]) => s === 'completed' || s === 'skipped')
     .map(([k]) => Number(k))
     .sort((a, b) => b - a)[0];
 
   if (lastProgressed) {
     displayStatus.textContent = state.stepStatuses[lastProgressed] === 'skipped'
-      ? t('statusSkipped', { step: lastProgressed })
-      : t('statusDone', { step: lastProgressed });
+      ? t('statusSkipped', { step: toDisplayStep(lastProgressed) })
+      : t('statusDone', { step: toDisplayStep(lastProgressed) });
   } else {
     displayStatus.textContent = t('statusReady');
   }
@@ -1117,6 +1155,7 @@ function appendLog(entry) {
   const levelLabel = entry.level.toUpperCase();
   const line = document.createElement('div');
   line.className = `log-line log-${entry.level}`;
+  const displayMessage = replaceStepNumberForDisplay(entry.message);
 
   const stepMatch = entry.message.match(/Step (\d+)/);
   const stepNum = stepMatch ? stepMatch[1] : null;
@@ -1124,9 +1163,9 @@ function appendLog(entry) {
   let html = `<span class="log-time">${time}</span> `;
   html += `<span class="log-level log-level-${entry.level}">${levelLabel}</span> `;
   if (stepNum) {
-    html += `<span class="log-step-tag step-${stepNum}">S${stepNum}</span>`;
+    html += `<span class="log-step-tag step-${stepNum}">S${toDisplayStep(stepNum)}</span>`;
   }
-  html += `<span class="log-msg">${escapeHtml(entry.message)}</span>`;
+  html += `<span class="log-msg">${escapeHtml(displayMessage)}</span>`;
 
   line.innerHTML = html;
   logArea.appendChild(line);
@@ -1370,7 +1409,7 @@ document.querySelectorAll('.step-skip-btn').forEach(btn => {
       showToast(t('skipFailed', { message: response.error }), 'error');
       return;
     }
-    showToast(t('stepSkippedToast', { step }), 'warn', 2000);
+    showToast(t('stepSkippedToast', { step: toDisplayStep(step) }), 'warn', 2000);
   });
 });
 
@@ -1518,6 +1557,14 @@ inputVpsUrl.addEventListener('click', async () => {
   await pasteCpaAuthFromClipboard({ silentIfFilled: true });
 });
 
+inputCpaManagementKey.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { cpaManagementKey: inputCpaManagementKey.value.trim() },
+  });
+});
+
 selectOauthProvider.addEventListener('change', async () => {
   updateOauthProviderUI();
   await chrome.runtime.sendMessage({
@@ -1556,6 +1603,14 @@ checkboxAutoDeleteIcloud.addEventListener('change', async () => {
     type: 'SAVE_SETTING',
     source: 'sidepanel',
     payload: { autoDeleteUsedIcloudAlias: checkboxAutoDeleteIcloud.checked },
+  });
+});
+
+checkboxDeleteBlockedAccount.addEventListener('change', async () => {
+  await chrome.runtime.sendMessage({
+    type: 'SAVE_SETTING',
+    source: 'sidepanel',
+    payload: { deleteAbusedMicrosoftAccount: checkboxDeleteBlockedAccount.checked },
   });
 });
 
@@ -1641,7 +1696,7 @@ chrome.runtime.onMessage.addListener((message) => {
     case 'LOG_ENTRY':
       appendLog(message.payload);
       if (message.payload.level === 'error') {
-        showToast(message.payload.message, 'error');
+        showToast(replaceStepNumberForDisplay(message.payload.message), 'error');
       }
       break;
 

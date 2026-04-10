@@ -42,15 +42,14 @@ async function handleCommand(message) {
         case 2: return await step2_clickRegister();
         case 3: return await step3_fillEmailPassword(message.payload);
         case 5: return await step5_fillNameBirthday(message.payload);
-        case 6: return await step6_login(message.payload);
-        case 8: return await step8_findAndClick();
+        case 8: return await step8_findAndClick(message.payload);
         default: throw new Error(`signup-page.js does not handle step ${message.step}`);
       }
     case 'FILL_CODE':
-      // Step 4 = signup code, Step 7 = login code (same handler)
+      // Step 4 = signup verification code
       return await fillVerificationCode(message.step, message.payload);
     case 'STEP8_FIND_AND_CLICK':
-      return await step8_findAndClick();
+      return await step8_findAndClick(message.payload);
     case 'WAIT_FOR_SURFACE':
       return await waitForSurfacePayload(message.payload);
     case 'RESEND_VERIFICATION_CODE':
@@ -172,6 +171,161 @@ async function step2_clickRegister() {
 // Step 3: Fill Email & Password
 // ============================================================
 
+const PASSWORD_RETRY_ATTEMPTS_KEY = '__multipage_password_retry_attempts';
+
+function isCreateAccountPasswordPage() {
+  return /\/create-account\/password/i.test(location.pathname)
+    || Boolean(document.querySelector('form[action*="/create-account/password"]'));
+}
+
+function getPasswordRetryAttempts() {
+  try {
+    return Number(window.sessionStorage.getItem(PASSWORD_RETRY_ATTEMPTS_KEY) || '0');
+  } catch {
+    return 0;
+  }
+}
+
+function setPasswordRetryAttempts(value) {
+  try {
+    window.sessionStorage.setItem(PASSWORD_RETRY_ATTEMPTS_KEY, String(Math.max(0, Number(value) || 0)));
+  } catch {}
+}
+
+function findPasswordErrorRetryButton() {
+  const direct = document.querySelector('button[data-dd-action-name="Try again"]');
+  if (direct) return direct;
+
+  const buttons = Array.from(document.querySelectorAll('button'));
+  return buttons.find((button) => /重试|try\s*again|retry/i.test((button.textContent || '').trim())) || null;
+}
+
+function isPasswordTimeoutErrorSurfacePresent() {
+  const titleText = String(document.querySelector('h1, [role="heading"]')?.textContent || '').trim();
+  const subtitleText = String(document.querySelector('._subtitle_o5zvr_13, [class*="subtitle"]')?.textContent || '').trim();
+  const fullText = `${titleText} ${subtitleText}`.trim();
+  return /糟糕|出错|error|oops|timed out|timeout/i.test(fullText);
+}
+
+async function getPasswordForRecovery(fallbackPassword = '') {
+  const preferred = String(fallbackPassword || '').trim();
+  if (preferred) return preferred;
+
+  try {
+    const state = await chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'signup-page' });
+    return String(state?.password || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function canAttemptPasswordRecoveryFromState(state) {
+  const statuses = state?.stepStatuses || {};
+  const step3 = statuses[3];
+  const step4 = statuses[4];
+  const step5 = statuses[5];
+
+  if (step5 === 'running' || step5 === 'completed') return false;
+  if (step3 === 'completed' || step3 === 'running') return true;
+  if (step4 === 'pending' || step4 === 'running' || step4 === 'failed') return true;
+  return false;
+}
+
+async function recoverPasswordAfterTimeout(options = {}) {
+  const { fallbackPassword = '', context = 'unknown' } = options;
+
+  if (!isCreateAccountPasswordPage()) return false;
+
+  const attempts = getPasswordRetryAttempts();
+  if (attempts >= 3) {
+    log(`Step 3: Password timeout recovery skipped (attempt limit reached, context=${context}).`, 'warn');
+    return false;
+  }
+
+  let state = null;
+  try {
+    state = await chrome.runtime.sendMessage({ type: 'GET_STATE', source: 'signup-page' });
+  } catch {}
+
+  if (state && !canAttemptPasswordRecoveryFromState(state)) {
+    return false;
+  }
+
+  const retryBtn = findPasswordErrorRetryButton();
+  if (retryBtn && isPasswordTimeoutErrorSurfacePresent()) {
+    await humanPause(300, 800);
+    simulateClick(retryBtn);
+    log(`Step 3: Password page timed out. Clicked "重试" (context=${context}).`, 'warn');
+    await sleep(1200);
+  }
+
+  const passwordInput = document.querySelector('input[type="password"], input[name="password"]');
+  if (!passwordInput) {
+    return false;
+  }
+
+  const password = await getPasswordForRecovery(fallbackPassword);
+  if (!password) {
+    log('Step 3: Password recovery skipped because no saved password was found.', 'warn');
+    return false;
+  }
+
+  if (!String(passwordInput.value || '').trim()) {
+    await humanPause(280, 760);
+    fillInput(passwordInput, password);
+    log('Step 3: Refilled password after retry.');
+  }
+
+  const submitBtn = document.querySelector('button[type="submit"]')
+    || await waitForElementByText('button', /continue|next|submit|继续|下一步|注册|创建|create|sign\s*up/i, 4000).catch(() => null);
+
+  if (!submitBtn) {
+    return false;
+  }
+
+  setPasswordRetryAttempts(attempts + 1);
+  await humanPause(260, 720);
+  simulateClick(submitBtn);
+  log(`Step 3: Submitted password page after retry (attempt ${attempts + 1}, context=${context}).`, 'ok');
+  return true;
+}
+
+async function startPasswordTimeoutRecoveryWatcher(password) {
+  const startedAt = Date.now();
+  const timeoutMs = 25000;
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!isCreateAccountPasswordPage()) {
+      return;
+    }
+
+    try {
+      const recovered = await recoverPasswordAfterTimeout({
+        fallbackPassword: password,
+        context: 'post-submit-watcher',
+      });
+      if (recovered) {
+        return;
+      }
+    } catch (err) {
+      log(`Step 3: Password retry watcher failed: ${err.message || err}`, 'warn');
+      return;
+    }
+
+    await sleep(1200);
+  }
+}
+
+async function autoRecoverPasswordTimeoutOnPageLoad() {
+  if (!isCreateAccountPasswordPage()) return;
+  await sleep(600);
+  await recoverPasswordAfterTimeout({ context: 'page-load' });
+}
+
+void autoRecoverPasswordTimeoutOnPageLoad().catch((err) => {
+  log(`Step 3: Auto password retry init failed: ${err.message || err}`, 'warn');
+});
+
 async function step3_fillEmailPassword(payload) {
   const { email } = payload;
   if (!email) throw new Error('No email provided. Paste email in Side Panel first.');
@@ -235,6 +389,7 @@ async function step3_fillEmailPassword(payload) {
     await humanPause(500, 1300);
     simulateClick(submitBtn);
     log('Step 3: Form submitted');
+    void startPasswordTimeoutRecoveryWatcher(payload.password);
   }
 }
 
@@ -325,112 +480,24 @@ async function findVerificationResendButton(timeout = 10000) {
 }
 
 // ============================================================
-// Step 6: Login with registered account (on OAuth auth page)
-// ============================================================
-
-async function step6_login(payload) {
-  const { email, password } = payload;
-  if (!email) throw new Error('No email provided for login.');
-
-  await ensureAuthSurfaceReady(6);
-  log(`Step 6: Logging in with ${email}...`);
-
-  // Wait for email input on the auth page
-  let emailInput = null;
-  try {
-    emailInput = await waitForElement(
-      'input[type="email"], input[name="email"], input[name="username"], input[id*="email"], input[placeholder*="email" i], input[placeholder*="Email"]',
-      15000
-    );
-  } catch {
-    throw new Error('Could not find email input on login page. URL: ' + location.href);
-  }
-
-  await humanPause(500, 1400);
-  fillInput(emailInput, email);
-  log('Step 6: Email filled');
-
-  // Submit email
-  await sleep(500);
-  const submitBtn1 = document.querySelector('button[type="submit"]')
-    || await waitForElementByText('button', /continue|next|submit|继续|下一步/i, 5000).catch(() => null);
-  if (submitBtn1) {
-    await humanPause(400, 1100);
-    simulateClick(submitBtn1);
-    log('Step 6: Submitted email');
-  }
-
-  const passwordInput = await waitForLoginPasswordField();
-  if (passwordInput) {
-    log('Step 6: Password field found, filling password...');
-    await humanPause(550, 1450);
-    fillInput(passwordInput, password);
-
-    await sleep(500);
-    const submitBtn2 = document.querySelector('button[type="submit"]')
-      || await waitForElementByText('button', /continue|log\s*in|submit|sign\s*in|登录|继续/i, 5000).catch(() => null);
-    // Report complete BEFORE submit in case page navigates
-    reportComplete(6, { needsOTP: true });
-
-    if (submitBtn2) {
-      await humanPause(450, 1200);
-      simulateClick(submitBtn2);
-      log('Step 6: Submitted password, may need verification code (step 7)');
-    }
-    return;
-  }
-
-  // No password field — OTP flow
-  log('Step 6: No password field. OTP flow or auto-redirect.');
-  reportComplete(6, { needsOTP: true });
-}
-
-async function waitForLoginPasswordField(timeout = 25000) {
-  const start = Date.now();
-
-  while (Date.now() - start < timeout) {
-    throwIfStopped();
-
-    const passwordInput = findVisiblePasswordInput();
-    if (passwordInput) {
-      return passwordInput;
-    }
-
-    await sleep(250);
-  }
-
-  log(`Step 6: Password field did not appear within ${Math.round(timeout / 1000)}s.`, 'warn');
-  return null;
-}
-
-function findVisiblePasswordInput() {
-  const inputs = document.querySelectorAll('input[type="password"]');
-  for (const input of inputs) {
-    if (isElementVisible(input)) {
-      return input;
-    }
-  }
-  return null;
-}
-
-function isElementVisible(el) {
-  if (!el) return false;
-  const style = window.getComputedStyle(el);
-  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
-    return false;
-  }
-  const rect = el.getBoundingClientRect();
-  return rect.width > 0 && rect.height > 0;
-}
-
-// ============================================================
 // Step 8: Find "继续" on OAuth consent page for debugger click
 // ============================================================
 // After login + verification, page shows:
 // "使用 ChatGPT 登录到 Codex" with a "继续" submit button.
 // Background performs the actual click through the debugger Input API.
 
-async function step8_findAndClick() {
+function isCodexConsentPage() {
+  return /\/sign-in-with-chatgpt\/codex\/consent/i.test(location.pathname)
+    || Boolean(document.querySelector('form[action*="/sign-in-with-chatgpt/codex/consent"]'));
+}
+
+function isAboutYouPage() {
+  return /\/about-you/i.test(location.pathname)
+    || Boolean(document.querySelector('form[action="/about-you"]'));
+}
+
+async function step8_findAndClick(options = {}) {
+  const { dryRun = false } = options;
   await ensureAuthSurfaceReady(8);
   log('Step 8: Looking for OAuth consent "继续" button...');
 
@@ -443,11 +510,44 @@ async function step8_findAndClick() {
   await sleep(250);
 
   const rect = getSerializableRect(continueBtn);
+  const pageUrl = location.href;
+  const consentPage = isCodexConsentPage();
+  const aboutYouPage = isAboutYouPage();
+
+  if (dryRun) {
+    log('Step 8: Continue button probe completed (dry-run).');
+    return {
+      rect,
+      buttonText: (continueBtn.textContent || '').trim(),
+      url: pageUrl,
+      isConsentPage: consentPage,
+      isAboutYouPage: aboutYouPage,
+      dryRun: true,
+    };
+  }
+
+  await humanPause(350, 900);
+  simulateClick(continueBtn);
+  log('Step 8: Continue button clicked directly in page script.');
+
+  let redirected = false;
+  try {
+    await waitForUrlChange(pageUrl, 2500);
+    redirected = true;
+  } catch {
+    redirected = false;
+  }
+
   log('Step 8: Found "继续" button and prepared debugger click coordinates.');
   return {
     rect,
     buttonText: (continueBtn.textContent || '').trim(),
-    url: location.href,
+    url: pageUrl,
+    urlAfter: location.href,
+    isConsentPage: consentPage,
+    isAboutYouPage: aboutYouPage,
+    directClicked: true,
+    redirected,
   };
 }
 

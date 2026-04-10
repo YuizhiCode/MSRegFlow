@@ -70,10 +70,21 @@
 http(s)://<your-host>/management.html#/oauth
 ```
 
+可选填写 `CPA Key`（Management Key）：
+
+- 已填写：Step 1/Step 9 走管理 API，不再依赖页面按钮点击
+- 未填写：保留旧版页面点击模式（兼容原流程）
+- 注意：这里必须填写**明文** Management Key，不要填配置文件里自动加密后的 `$2...` 串
+
+CPA API 模式会调用：
+
+- `GET /v0/management/codex-auth-url`（获取授权链接）
+- `GET /v0/management/get-auth-status?state=...`（确认回调导入状态）
+
 对应流程：
 
 - Step 1：获取 OAuth 链接
-- Step 9：回填 callback 并验证导入
+- Step 9：验证 callback 并完成导入
 
 #### Sub2API 模式
 
@@ -102,6 +113,9 @@ http(s)://<your-host>/management.html#/oauth
 - `Token`：`MAIL_API_TOKEN`
 - `Mode`：`graph` 或 `imap`
 - `Filter`：可选，按关键词筛选账号
+- `封号处理`：
+  - 勾选：Step 4 遇到 `AADSTS70000` 时自动删除被封邮箱并换号重试
+  - 不勾选：Step 4 遇到 `AADSTS70000` 时跳过该邮箱（标记 `已封禁`）并换号重试
 
 ### 3) Email
 
@@ -122,24 +136,24 @@ http(s)://<your-host>/management.html#/oauth
 
 ---
 
-## 工作流（10 步）
+## 工作流（面板显示 8 步）
 
 1. `Get OAuth Link`
 2. `Open Signup`
 3. `Fill Email / Password`
 4. `Get Signup Code`
 5. `Fill Name / Birthday`
-6. `Login via OAuth`
-7. `Get Login Code`
-8. `OAuth Auto Confirm`
-9. `Callback Verify / Import`
-10. `Cleanup Source Email`
+6. `OAuth Auto Confirm`
+7. `Callback Verify / Import`
+8. `Cleanup Source Email`
+
+说明：面板流程固定为 8 步（1~8），其中 OAuth 确认、导入、清理分别对应第 6/7/8 步。
 
 ---
 
 ## 常见问题
 
-### 1) Step 9 报缺少 code/state
+### 1) Step 7 报缺少 code/state
 
 如果 callback URL 中包含 `error=request_forbidden` 或 CSRF 相关描述，
 说明授权会话失配（常见于页面过期/会话变化）。
@@ -148,7 +162,7 @@ http(s)://<your-host>/management.html#/oauth
 
 1. 从 Step 1 重新获取新的 OAuth 链接
 2. 不要复用过期授权页
-3. 按顺序继续到 Step 9
+3. 按顺序继续到 Step 7
 
 ### 2) Sub2API 鉴权失败
 

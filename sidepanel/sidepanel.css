@@ -830,8 +830,6 @@ header {
 [data-theme="dark"] .log-step-tag.step-3 { color: #fbbf24; background: rgba(251, 191, 36, 0.1); }
 .log-step-tag.step-4 { color: var(--orange); background: var(--orange-soft); }
 .log-step-tag.step-5 { color: var(--green); background: var(--green-soft); }
-.log-step-tag.step-6 { color: var(--cyan); background: rgba(8, 145, 178, 0.08); }
-.log-step-tag.step-7 { color: var(--orange); background: var(--orange-soft); }
 .log-step-tag.step-8 { color: var(--purple); background: rgba(124, 58, 237, 0.08); }
 .log-step-tag.step-9 { color: var(--green); background: var(--green-soft); }
 
